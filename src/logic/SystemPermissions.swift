@@ -63,7 +63,12 @@ class SystemPermissions {
 
     private static func detectScreenRecordingIsGranted() -> PermissionStatus {
         if #available(macOS 10.15, *) {
-            return screenRecordingIsGrantedOnSomeDisplay() ? .granted :
+            // Prefer CGPreflightScreenCaptureAccess (reliable on modern macOS / ad-hoc builds).
+            // Keep the CGDisplayStream probe as a secondary signal for older OS behavior.
+            let preflightGranted = CGPreflightScreenCaptureAccess()
+            let streamGranted = screenRecordingIsGrantedOnSomeDisplay()
+            let granted = preflightGranted || streamGranted
+            return granted ? .granted :
                 (Preferences.screenRecordingPermissionSkipped ? .skipped : .notGranted)
         }
         return .granted

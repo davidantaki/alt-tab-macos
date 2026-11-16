@@ -24,6 +24,8 @@ class App: AppCenterApplication {
     var appIsBeingUsed = false
     var shortcutIndex = 0
     var forceDoNothingOnRelease = false
+    /// True while the user is typing a custom window label in the switcher.
+    var isEditingWindowLabel = false
     private var feedbackWindow: FeedbackWindow!
     private var isFirstSummon = true
     private var isVeryFirstSummon = true
@@ -64,9 +66,13 @@ class App: AppCenterApplication {
     func hideUi(_ keepPreview: Bool = false) {
         Logger.info(appIsBeingUsed)
         guard appIsBeingUsed else { return } // already hidden
+        if isEditingWindowLabel {
+            WindowLabels.cancelEditingIfNeeded()
+        }
         appIsBeingUsed = false
         isFirstSummon = true
         forceDoNothingOnRelease = false
+        isEditingWindowLabel = false
         MouseEvents.toggle(false)
         hideThumbnailPanelWithoutChangingKeyWindow()
         if !keepPreview {
@@ -293,7 +299,7 @@ extension App: NSApplicationDelegate {
         appCenterDelegate = AppCenterCrash()
         App.shared.disableRelaunchOnLogin()
         Logger.initialize()
-        Logger.info("Launching AltTab \(App.version)")
+        Logger.info("Launching \(App.name) \(App.version)")
         #if DEBUG
         UserDefaults.standard.set(true, forKey: "NSConstraintBasedLayoutVisualizeMutuallyExclusiveConstraints")
         #endif
@@ -327,7 +333,7 @@ extension App: NSApplicationDelegate {
             TrackpadEvents.observe()
             CliEvents.observe()
             self.preloadWindows()
-            Logger.info("AltTab finished launching")
+            Logger.info("\(App.name) finished launching")
             #if DEBUG
 //            self.showPreferencesWindow()
             #endif

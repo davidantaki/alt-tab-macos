@@ -88,6 +88,7 @@ class Preferences {
         "hideThumbnails": "false",
         "previewFocusedWindow": "false",
         "screenRecordingPermissionSkipped": "false",
+        "windowLabels": "{}",
     ]
 
     // system preferences
@@ -169,7 +170,8 @@ class Preferences {
     }
 
     static func set<T>(_ key: String, _ value: T) where T: Encodable {
-        UserDefaults.standard.set(key == "blacklist" ? jsonEncode(value) : value, forKey: key)
+        let shouldJsonEncode = key == "blacklist" || key == "windowLabels"
+        UserDefaults.standard.set(shouldJsonEncode ? jsonEncode(value) : value, forKey: key)
         CachedUserDefaults.cache.removeValue(forKey: key)
     }
 

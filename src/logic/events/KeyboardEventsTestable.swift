@@ -1,4 +1,5 @@
 import ShortcutRecorder
+import Carbon.HIToolbox.Events
 
 class KeyboardEventsTestable {
     static let globalShortcutsIds = [
@@ -14,6 +15,19 @@ class KeyboardEventsTestable {
 @discardableResult
 func handleKeyboardEvent(_ globalId: Int?, _ shortcutState: ShortcutState?, _ keyCode: UInt32?, _ modifiers: NSEvent.ModifierFlags?, _ isARepeat: Bool) -> Bool {
     Logger.debug(globalId, shortcutState, keyCode, modifiers, isARepeat, NSEvent.modifierFlags)
+    // While editing a window label, let key events reach the text field.
+    // Escape cancels editing; hold-key release is already suppressed via forceDoNothingOnRelease.
+    if App.app.isEditingWindowLabel {
+        if let keyCode, keyCode == UInt32(kVK_Escape) {
+            WindowLabels.cancelEditingIfNeeded()
+            return true
+        }
+        // Still track hold-shortcut state so release doesn't get stuck, but don't execute actions.
+        for shortcut in ControlsTab.shortcuts.values {
+            _ = shortcut.matches(globalId, shortcutState, keyCode, modifiers)
+        }
+        return false
+    }
     var someShortcutTriggered = false
     for shortcut in ControlsTab.shortcuts.values {
         if shortcut.matches(globalId, shortcutState, keyCode, modifiers) && shortcut.shouldTrigger() {

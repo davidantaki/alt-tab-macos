@@ -1,4 +1,5 @@
 import Cocoa
+import Carbon.HIToolbox.Events
 
 class ThumbnailView: FlippedView {
     static let noOpenWindowToolTip = NSLocalizedString("App is running but has no open window", comment: "")
@@ -19,6 +20,8 @@ class ThumbnailView: FlippedView {
     var closeIcon = TrafficLightButton(.close, NSLocalizedString("Close window", comment: ""))
     var minimizeIcon = TrafficLightButton(.miniaturize, NSLocalizedString("Minimize/Deminimize window", comment: ""))
     var maximizeIcon = TrafficLightButton(.fullscreen, NSLocalizedString("Fullscreen/Defullscreen window", comment: ""))
+    var editLabelButton = EditLabelButton()
+    var labelEditor = ThumbnailLabelEditor()
     var windowlessAppIndicator = WindowlessAppIndicator(tooltip: ThumbnailView.noOpenWindowToolTip)
 
     let hStackView = FlippedView()
@@ -28,6 +31,7 @@ class ThumbnailView: FlippedView {
     var dragAndDropTimer: Timer?
     var indexInRecycledViews: Int!
     var isShowingWindowControls = false
+    var isEditingLabel = false
 
     var isFirstInRow = false
     var isLastInRow = false
@@ -85,16 +89,37 @@ class ThumbnailView: FlippedView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        // Don't treat clicks on the edit-label control as "select this window"
+        if isEventOnEditLabelButton(event) { return }
         receivedMouseDown = true
     }
 
     override func mouseUp(with event: NSEvent) {
+        if isEventOnEditLabelButton(event) {
+            receivedMouseDown = false
+            return
+        }
         if receivedMouseDown {
             if bounds.contains(convert(event.locationInWindow, from: nil)) {
                 mouseUpCallback()
             }
             receivedMouseDown = false
         }
+    }
+
+    private func isEventOnEditLabelButton(_ event: NSEvent) -> Bool {
+        let locInWindow = event.locationInWindow
+        let loc = convert(locInWindow, from: nil)
+        guard let hit = hitTest(loc) else { return false }
+        var view: NSView? = hit
+        while let current = view {
+            if current === editLabelButton { return true }
+            if current === self { break }
+            view = current.superview
+        }
+        // Fallback: frame contains point (hit testing can miss frame-based views in panels)
+        let locInButton = editLabelButton.convert(locInWindow, from: nil)
+        return !editLabelButton.isHidden && editLabelButton.bounds.contains(locInButton)
     }
 
     override func otherMouseUp(with event: NSEvent) {
@@ -112,6 +137,9 @@ class ThumbnailView: FlippedView {
 
     func mouseMoved() {
         showOrHideWindowControls(true)
+        // Keep edit-button hover in sync even if tracking areas miss events in the panel
+        let locInButton = editLabelButton.convert(window?.mouseLocationOutsideOfEventStream ?? .zero, from: nil)
+        editLabelButton.setHover(!editLabelButton.isHidden && editLabelButton.bounds.contains(locInButton))
         mouseMovedCallback()
     }
 
@@ -122,11 +150,16 @@ class ThumbnailView: FlippedView {
     }
 
     func updateRecycledCellWithNewContent(_ element: Window, _ index: Int, _ newHeight: CGFloat) {
+        if isEditingLabel, window_ !== element {
+            cancelLabelEditing()
+        }
         window_ = element
         updateValues(element, index, newHeight)
         updateSizes(newHeight)
         updatePositions(newHeight)
-        label.toolTip = label.cell!.cellSize.width >= label.frame.size.width ? label.stringValue : nil
+        if !isEditingLabel {
+            label.toolTip = label.cell!.cellSize.width >= label.frame.size.width ? label.stringValue : nil
+        }
     }
 
     func drawHighlight() {
@@ -136,17 +169,25 @@ class ThumbnailView: FlippedView {
         setBorder(isFocused: isFocused, isHovered: isHovered)
         setShadow(isFocused: isFocused, isHovered: isHovered)
         if Preferences.appearanceStyle == .appIcons {
-            label.isHidden = !(isFocused || isHovered)
-            updateAppIconsLabel(isFocused: isFocused, isHovered: isHovered)
+            if isEditingLabel {
+                label.isHidden = true
+                labelEditor.isHidden = false
+            } else {
+                label.isHidden = !(isFocused || isHovered)
+                updateAppIconsLabel(isFocused: isFocused, isHovered: isHovered)
+            }
         }
+        updateEditLabelButtonVisibility()
     }
 
     func showOrHideWindowControls(_ shouldShowWindowControls: Bool) {
-        let shouldShow = shouldShowWindowControls && !Preferences.hideColoredCircles && !Appearance.hideThumbnails
+        // Keep controls visible while the user is typing a custom label.
+        let showRequested = shouldShowWindowControls || isEditingLabel
+        let shouldShowTrafficLights = showRequested && !Preferences.hideColoredCircles && !Appearance.hideThumbnails
         if Preferences.appearanceStyle == .thumbnails {
-            isShowingWindowControls = shouldShow
+            isShowingWindowControls = shouldShowTrafficLights
             for icon in windowControlIcons {
-                icon.isHidden = !shouldShow
+                icon.isHidden = !shouldShowTrafficLights
                     || (icon.type == .quit && !(window_?.application.canBeQuit() ?? true))
                     || (icon.type == .close && !(window_?.canBeClosed() ?? true))
                     || ((icon.type == .miniaturize || icon.type == .fullscreen) && !(window_?.canBeMinDeminOrFullscreened() ?? true))
@@ -155,6 +196,12 @@ class ThumbnailView: FlippedView {
                 icon.display()
             }
         }
+        updateEditLabelButtonVisibility()
+    }
+
+    /// Always show the ✎ button on each row (except while editing that row).
+    private func updateEditLabelButtonVisibility() {
+        editLabelButton.isHidden = window_ == nil || isEditingLabel
     }
 
     func updateDockLabelIcon(_ dockLabel: String?) {
@@ -192,6 +239,8 @@ class ThumbnailView: FlippedView {
         appIcon.translatesAutoresizingMaskIntoConstraints = false
         appIcon.setSubviewAbove(dockLabelIcon)
         label.fixHeight()
+        setupLabelEditor()
+        setupEditLabelButton()
         vStackView.wantsLayer = true
         vStackView.layer!.backgroundColor = .clear
         vStackView.layer!.borderColor = .clear
@@ -202,10 +251,31 @@ class ThumbnailView: FlippedView {
         hStackView.setSubviews([appIcon])
     }
 
+    private func setupEditLabelButton() {
+        editLabelButton.onClick = { [weak self] in
+            self?.beginLabelEditing()
+        }
+        // Visible by default once a window is bound; see updateEditLabelButtonVisibility()
+        editLabelButton.isHidden = false
+        // Frame-based layout (same as the rest of the switcher); do not leave Auto Layout on.
+        editLabelButton.translatesAutoresizingMaskIntoConstraints = true
+    }
+
+    private func setupLabelEditor() {
+        labelEditor.isHidden = true
+        labelEditor.target = self
+        labelEditor.action = #selector(commitLabelEditing)
+        labelEditor.onEscape = { [weak self] in
+            self?.cancelLabelEditing()
+        }
+    }
+
     private func setupStyleSpecificSubviews() {
         if Preferences.appearanceStyle == .appIcons {
-            addSubviews([label])
+            addSubviews([label, labelEditor])
             hStackView.setSubviewAbove(windowlessAppIndicator)
+            // Top-right of the icon cell
+            vStackView.setSubviewAbove(editLabelButton)
             label.alignment = .center
             label.isHidden = true
         } else if Preferences.appearanceStyle == .thumbnails {
@@ -216,10 +286,14 @@ class ThumbnailView: FlippedView {
                 thumbnailContainer.setSubviewAbove(icon)
                 icon.isHidden = true
             }
-            hStackView.addSubviews([label] + windowIndicatorIcons)
+            // Title row: label + status icons + edit button on the far right
+            hStackView.addSubviews([label] + windowIndicatorIcons + [editLabelButton])
+            hStackView.addSubviews([labelEditor])
         } else {
+            // Titles style: edit button always on the far right of the row
             hStackView.setSubviewAbove(windowlessAppIndicator)
-            hStackView.addSubviews([label] + windowIndicatorIcons)
+            hStackView.addSubviews([label] + windowIndicatorIcons + [editLabelButton])
+            hStackView.addSubviews([labelEditor])
         }
     }
 
@@ -351,10 +425,14 @@ class ThumbnailView: FlippedView {
             thumbnail.setAccessibilityLabel(element.title)
         }
         let title = getAppOrAndWindowTitle()
-        let labelChanged = label.stringValue != title
-        if labelChanged {
-            label.stringValue = title
-            setAccessibilityLabel(title)
+        if !isEditingLabel {
+            let labelChanged = label.stringValue != title
+            if labelChanged {
+                label.stringValue = title
+                setAccessibilityLabel(title)
+            }
+            // Tooltip when truncated (full string includes custom label + normal title)
+            label.toolTip = label.cell!.cellSize.width >= label.frame.size.width ? label.stringValue : nil
         }
         label.updateTruncationModeIfNeeded()
         if !spaceIcon.isHidden {
@@ -376,6 +454,7 @@ class ThumbnailView: FlippedView {
         }
         windowControlIcons.forEach { $0.window_ = element }
         showOrHideWindowControls(isShowingWindowControls)
+        updateEditLabelButtonVisibility()
         mouseUpCallback = { () -> Void in App.app.focusSelectedWindow(element) }
         mouseMovedCallback = { () -> Void in Windows.updateFocusedAndHoveredWindowIndex(index, true) }
     }
@@ -387,8 +466,9 @@ class ThumbnailView: FlippedView {
             hStackView.frame.size = NSSize(width: appIcon.frame.width, height: appIcon.frame.height)
         } else {
             vStackView.frame.size = NSSize(width: frame.width, height: frame.height)
-            hStackView.frame.size = NSSize(width: frame.width - Appearance.edgeInsetsSize * 2, height: max(appIcon.frame.height, label.cell!.cellSize.height))
-            let labelWidth = hStackView.frame.width - appIcon.frame.width - Appearance.appIconLabelSpacing - indicatorsSpace()
+            let rowHeight = max(appIcon.frame.height, label.cell!.cellSize.height, EditLabelButton.minHeight)
+            hStackView.frame.size = NSSize(width: frame.width - Appearance.edgeInsetsSize * 2, height: rowHeight)
+            let labelWidth = hStackView.frame.width - appIcon.frame.width - Appearance.appIconLabelSpacing - indicatorsSpace() - editLabelButtonSpace()
             label.setWidth(labelWidth)
         }
         if Preferences.appearanceStyle == .thumbnails {
@@ -400,24 +480,37 @@ class ThumbnailView: FlippedView {
     private func updatePositions(_ newHeight: CGFloat) {
         hStackView.frame.origin = NSPoint(x: Appearance.edgeInsetsSize, y: Appearance.edgeInsetsSize)
         if Preferences.appearanceStyle != .appIcons {
-            appIcon.frame.origin.x = App.shared.userInterfaceLayoutDirection == .leftToRight
-                ? 0
-                : hStackView.frame.width - appIcon.frame.width
+            let ltr = App.shared.userInterfaceLayoutDirection == .leftToRight
+            appIcon.frame.origin.x = ltr ? 0 : hStackView.frame.width - appIcon.frame.width
             let iconWidth = windowIndicatorIcons.first!.cell!.cellSize.width
+            let editWidth = EditLabelButton.width
+            // Full-height edit button on the far right of the row (past the space-number circle)
+            editLabelButton.translatesAutoresizingMaskIntoConstraints = true
+            editLabelButton.frame = NSRect(
+                x: ltr ? hStackView.frame.width - editWidth : 0,
+                y: 0,
+                width: editWidth,
+                height: hStackView.frame.height
+            )
+            editLabelButton.updateTrackingAreas()
+            // Status icons (e.g. space number circle) sit just left of the edit button
             var indicatorSpace = CGFloat(0)
             for icon in windowIndicatorIcons {
                 if !icon.isHidden {
                     indicatorSpace += iconWidth
                     icon.centerFrameInParent(y: true)
-                    icon.frame.origin.x = App.shared.userInterfaceLayoutDirection == .leftToRight
-                        ? hStackView.frame.width - indicatorSpace
-                        : indicatorSpace - iconWidth
+                    icon.frame.origin.x = ltr
+                        ? hStackView.frame.width - editWidth - Appearance.appIconLabelSpacing - indicatorSpace
+                        : editWidth + Appearance.appIconLabelSpacing + indicatorSpace - iconWidth
                 }
             }
-            let labelWidth = hStackView.frame.width - appIcon.frame.width - Appearance.appIconLabelSpacing - indicatorSpace
-            label.frame.origin.x = App.shared.userInterfaceLayoutDirection == .leftToRight
+            let rightChrome = editLabelButtonSpace() + indicatorSpace
+            let labelWidth = max(0, hStackView.frame.width - appIcon.frame.width - Appearance.appIconLabelSpacing - rightChrome)
+            label.setWidth(labelWidth)
+            label.frame.origin.x = ltr
                 ? appIcon.frame.maxX + Appearance.appIconLabelSpacing
-                : hStackView.frame.width - appIcon.frame.width - Appearance.appIconLabelSpacing - labelWidth
+                : rightChrome
+            label.frame.size.width = labelWidth
             label.centerFrameInParent(y: true)
         }
         if Preferences.appearanceStyle == .thumbnails {
@@ -434,6 +527,20 @@ class ThumbnailView: FlippedView {
                     yOffset += TrafficLightButton.size + TrafficLightButton.spacing
                 }
             }
+        } else if Preferences.appearanceStyle == .appIcons {
+            // Full-height strip on the right of the icon cell
+            let editWidth = EditLabelButton.width
+            editLabelButton.translatesAutoresizingMaskIntoConstraints = true
+            editLabelButton.frame = NSRect(
+                x: max(0, vStackView.frame.width - editWidth),
+                y: 0,
+                width: editWidth,
+                height: vStackView.frame.height
+            )
+            editLabelButton.updateTrackingAreas()
+        }
+        if isEditingLabel {
+            layoutLabelEditor()
         }
         if !windowlessAppIndicator.isHidden {
             if Preferences.appearanceStyle != .titles {
@@ -457,7 +564,25 @@ class ThumbnailView: FlippedView {
         return CGFloat(windowIndicatorIcons.filter { !$0.isHidden }.count) * iconWidth
     }
 
+    /// Width reserved for the always-visible edit-label button (+ spacing).
+    private func editLabelButtonSpace() -> CGFloat {
+        if editLabelButton.isHidden { return 0 }
+        return EditLabelButton.width + Appearance.appIconLabelSpacing
+    }
+
     private func getAppOrAndWindowTitle() -> String {
+        let normalTitle = normalAppOrWindowTitle()
+        // Custom AltTab-only label appears to the left of the normal title.
+        if let window_, let custom = WindowLabels.label(for: window_), !custom.isEmpty {
+            if normalTitle.isEmpty {
+                return custom
+            }
+            return "\(custom) · \(normalTitle)"
+        }
+        return normalTitle
+    }
+
+    private func normalAppOrWindowTitle() -> String {
         let appName = window_?.application.localizedName
         let windowTitle = window_?.title
         if Preferences.onlyShowApplications() || Preferences.showTitles == .appName {
@@ -466,6 +591,77 @@ class ThumbnailView: FlippedView {
             return [appName, windowTitle].compactMap { $0 }.joined(separator: " - ")
         }
         return windowTitle ?? ""
+    }
+
+    @objc func beginLabelEditing() {
+        guard let window_, !isEditingLabel else { return }
+        WindowLabels.beginEditing(self)
+        isEditingLabel = true
+        showOrHideWindowControls(true)
+        label.isHidden = true
+        labelEditor.isHidden = false
+        labelEditor.stringValue = WindowLabels.label(for: window_) ?? ""
+        labelEditor.placeholderString = WindowLabels.originalTitleDescription(for: window_)
+        layoutLabelEditor()
+        // Make sure the panel can take keyboard focus for typing
+        App.app.thumbnailsPanel.makeKeyAndOrderFront(nil)
+        App.app.thumbnailsPanel.makeFirstResponder(labelEditor)
+    }
+
+    @objc func commitLabelEditing() {
+        guard isEditingLabel, let window_ else {
+            cancelLabelEditing()
+            return
+        }
+        WindowLabels.setLabel(labelEditor.stringValue, for: window_)
+        finishLabelEditing(committed: true)
+    }
+
+    func cancelLabelEditing() {
+        guard isEditingLabel else { return }
+        finishLabelEditing(committed: false)
+    }
+
+    private func finishLabelEditing(committed: Bool) {
+        isEditingLabel = false
+        WindowLabels.endEditing(self)
+        labelEditor.isHidden = true
+        labelEditor.abortEditing()
+        App.app.thumbnailsPanel.makeFirstResponder(nil)
+        if Preferences.appearanceStyle == .appIcons {
+            let isFocused = indexInRecycledViews == Windows.focusedWindowIndex
+            let isHovered = indexInRecycledViews == Windows.hoveredWindowIndex
+            label.isHidden = !(isFocused || isHovered)
+        } else {
+            label.isHidden = false
+        }
+        if committed {
+            let title = getAppOrAndWindowTitle()
+            label.stringValue = title
+            setAccessibilityLabel(title)
+            label.toolTip = label.cell!.cellSize.width >= label.frame.size.width ? label.stringValue : nil
+        }
+        showOrHideWindowControls(indexInRecycledViews == Windows.hoveredWindowIndex
+            || indexInRecycledViews == Windows.focusedWindowIndex)
+        // Re-layout title width if label length changed
+        if Preferences.appearanceStyle != .appIcons {
+            let labelWidth = hStackView.frame.width - appIcon.frame.width - Appearance.appIconLabelSpacing - indicatorsSpace()
+            label.setWidth(labelWidth)
+        }
+    }
+
+    private func layoutLabelEditor() {
+        if Preferences.appearanceStyle == .appIcons {
+            labelEditor.frame = label.frame
+            labelEditor.font = label.font
+        } else {
+            labelEditor.frame = label.frame
+            labelEditor.font = label.font
+        }
+        // Ensure a comfortable typing height
+        let height = max(labelEditor.frame.height, (label.font?.pointSize ?? 12) + 8)
+        labelEditor.frame.size.height = height
+        labelEditor.centerFrameInParent(y: true)
     }
 
     private func setFrameWidthHeight(_ newHeight: CGFloat) {
@@ -596,5 +792,180 @@ class ThumbnailView: FlippedView {
             return ThumbnailView.iconSize().height + Appearance.edgeInsetsSize * 2 + Appearance.intraCellPadding * 2 + labelHeight
         }
         return ThumbnailView.maxThumbnailHeight()
+    }
+}
+
+/// Full-height control on the right of each switcher row (past the space-number circle).
+/// Implemented as a view (not NSButton) so clicks work reliably in the nonactivating panel.
+class EditLabelButton: FlippedView {
+    static let width = CGFloat(28)
+    static let minHeight = CGFloat(22)
+    var onClick: (() -> Void)?
+    private var isMouseOver = false
+    private var isPressed = false
+
+    init() {
+        super.init(frame: NSRect(origin: .zero, size: NSSize(width: EditLabelButton.width, height: EditLabelButton.minHeight)))
+        wantsLayer = false
+        toolTip = NSLocalizedString("Edit label (AltTab only)", comment: "")
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(toolTip)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("Class only supports programmatic initialization")
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas {
+            removeTrackingArea(area)
+        }
+        // mouseMoved + activeAlways so hover works even though the switcher panel is non-key
+        let options: NSTrackingArea.Options = [
+            .mouseEnteredAndExited,
+            .mouseMoved,
+            .activeAlways,
+            .inVisibleRect,
+            .enabledDuringMouseDrag,
+        ]
+        addTrackingArea(NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        setHover(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isPressed = false
+        setHover(false)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let inside = bounds.contains(convert(event.locationInWindow, from: nil))
+        setHover(inside)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        isPressed = true
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let inside = bounds.contains(convert(event.locationInWindow, from: nil))
+        if isPressed && inside {
+            onClick?()
+        }
+        isPressed = false
+        needsDisplay = true
+    }
+
+    /// Called from parent when it knows the pointer is over this control (fallback if tracking areas lag).
+    func setHover(_ hovering: Bool) {
+        guard isMouseOver != hovering else { return }
+        isMouseOver = hovering
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let accent: NSColor
+        if #available(macOS 10.14, *) {
+            accent = NSColor.controlAccentColor
+        } else {
+            accent = NSColor.systemBlue
+        }
+
+        // Clear contrast between rest / hover / pressed
+        let bg: NSColor
+        let border: NSColor
+        let symbolColor: NSColor
+        if isPressed {
+            bg = accent
+            border = NSColor.white.withAlphaComponent(0.55)
+            symbolColor = .white
+        } else if isMouseOver {
+            bg = accent.blended(withFraction: 0.25, of: .white) ?? accent
+            border = NSColor.white.withAlphaComponent(0.7)
+            symbolColor = .white
+        } else {
+            bg = NSColor.black.withAlphaComponent(0.35)
+            border = NSColor.white.withAlphaComponent(0.2)
+            symbolColor = NSColor.white.withAlphaComponent(0.85)
+        }
+
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 5, yRadius: 5)
+        bg.setFill()
+        path.fill()
+        border.setStroke()
+        path.lineWidth = isMouseOver || isPressed ? 1.5 : 1
+        path.stroke()
+
+        // Slight inner highlight on hover so the state is obvious
+        if isMouseOver && !isPressed {
+            let inner = NSBezierPath(roundedRect: bounds.insetBy(dx: 2.5, dy: 2.5), xRadius: 4, yRadius: 4)
+            NSColor.white.withAlphaComponent(0.12).setFill()
+            inner.fill()
+        }
+
+        let symbol = "✎" as NSString
+        let fontSize: CGFloat = isMouseOver || isPressed ? 15 : 14
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: symbolColor,
+        ]
+        let size = symbol.size(withAttributes: attrs)
+        let point = NSPoint(
+            x: (bounds.width - size.width) / 2,
+            y: (bounds.height - size.height) / 2 - 0.5
+        )
+        symbol.draw(at: point, withAttributes: attrs)
+    }
+}
+
+/// Inline text field used to type a custom window label without dismissing the switcher.
+class ThumbnailLabelEditor: NSTextField {
+    var onEscape: (() -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        isEditable = true
+        isSelectable = true
+        isBordered = true
+        isBezeled = true
+        bezelStyle = .roundedBezel
+        drawsBackground = true
+        backgroundColor = NSColor.textBackgroundColor
+        textColor = NSColor.labelColor
+        focusRingType = .exterior
+        cell?.sendsActionOnEndEditing = true
+        cell?.wraps = false
+        cell?.isScrollable = true
+        cell?.usesSingleLineMode = true
+        font = Appearance.font
+        placeholderString = NSLocalizedString("Custom label", comment: "")
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("Class only supports programmatic initialization")
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == UInt16(kVK_Escape) {
+            onEscape?()
+            return
+        }
+        if event.keyCode == UInt16(kVK_Return) || event.keyCode == UInt16(kVK_ANSI_KeypadEnter) {
+            sendAction(action, to: target)
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        onEscape?()
     }
 }
