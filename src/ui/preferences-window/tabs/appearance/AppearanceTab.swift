@@ -364,6 +364,7 @@ extension Popover: NSPopoverDelegate {
 }
 
 class AppearanceTab: NSObject {
+    private static var styleButtons = [ImageTextButtonView]()
     static var customizeStyleButton: NSButton!
     static var animationsButton: NSButton!
     static var customizeStyleSheet: CustomizeStyleSheet!
@@ -390,9 +391,11 @@ class AppearanceTab: NSObject {
         let table = TableGroupView(title: NSLocalizedString("Appearance", comment: ""),
             subTitle: NSLocalizedString("Switch between 3 different styles. You can customize them.", comment: ""),
             width: PreferencesWindow.width)
-        table.addRow(secondaryViews: [LabelAndControl.makeImageRadioButtons("appearanceStyle", AppearanceStylePreference.allCases, extraAction: { _ in
+        let stylePicker = LabelAndControl.makeImageRadioButtons("appearanceStyle", AppearanceStylePreference.allCases, extraAction: { _ in
             toggleCustomizeStyleButton()
-        }, buttonSpacing: 10)], secondaryViewsAlignment: .centerX)
+        }, buttonSpacing: 10)
+        styleButtons = stylePicker.arrangedSubviews.compactMap { $0 as? ImageTextButtonView }
+        table.addRow(secondaryViews: [stylePicker], secondaryViewsAlignment: .centerX)
         table.addRow(leftText: NSLocalizedString("Size", comment: ""),
             rightViews: [LabelAndControl.makeSegmentedControl("appearanceSize", AppearanceSizePreference.allCases, segmentWidth: 100)])
         table.addRow(leftText: NSLocalizedString("Theme", comment: ""),
@@ -427,6 +430,9 @@ class AppearanceTab: NSObject {
     }
 
     @objc static func handleToggleAdvancedButton() {
+        for (index, button) in styleButtons.enumerated() {
+            button.state = AppearanceStylePreference.allCases[index] == Preferences.appearanceStyle ? .on : .off
+        }
         customizeStyleButton.animator().title = getCustomizeStyleButtonTitle()
         customizeStyleSheet = CustomizeStyleSheet()
     }

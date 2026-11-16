@@ -2,6 +2,7 @@ import Cocoa
 
 class ThumbnailsView: NSVisualEffectView {
     let scrollView = ScrollView()
+    private let appearancePicker = SwitcherAppearancePicker()
     static var recycledViews = [ThumbnailView]()
     var rows = [[ThumbnailView]]()
     static var thumbnailsWidth = CGFloat(0.0)
@@ -15,6 +16,15 @@ class ThumbnailsView: NSVisualEffectView {
         wantsLayer = true
         updateRoundedCorners(Appearance.windowCornerRadius)
         addSubview(scrollView)
+        addSubview(appearancePicker)
+        appearancePicker.onSelect = { [weak self] style in
+            guard let self, style != Preferences.appearanceStyle else { return }
+            WindowLabels.cancelEditingIfNeeded()
+            Preferences.set("appearanceStyle", style.indexAsString)
+            self.reset()
+            AppearanceTab.toggleCustomizeStyleButton()
+            App.app.refreshOpenUi(Windows.list, .refreshUiAfterExternalEvent)
+        }
         // TODO: think about this optimization more
         (1...20).forEach { _ in ThumbnailsView.recycledViews.append(ThumbnailView()) }
     }
@@ -29,6 +39,7 @@ class ThumbnailsView: NSVisualEffectView {
             ThumbnailsView.recycledViews[i] = ThumbnailView()
         }
         updateRoundedCorners(Appearance.windowCornerRadius)
+        appearancePicker.updateSelection(Preferences.appearanceStyle)
     }
 
     static func highlight(_ indexInRecycledViews: Int) {
@@ -88,7 +99,7 @@ class ThumbnailsView: NSVisualEffectView {
         let focusedViewFrame = ThumbnailsView.recycledViews[Windows.focusedWindowIndex].frame
         let originCenter = NSMidX(focusedViewFrame)
         if let targetRow = nextRow(direction, allowWrap: allowWrap) {
-            let leftSide = originCenter < NSMidX(frame)
+            let leftSide = originCenter < NSMidX(scrollView.documentView!.bounds)
             let leadingSide = App.shared.userInterfaceLayoutDirection == .leftToRight ? leftSide : !leftSide
             let iterable = leadingSide ? targetRow : targetRow.reversed()
             let targetView = iterable.first {
@@ -103,7 +114,7 @@ class ThumbnailsView: NSVisualEffectView {
     }
 
     func updateItemsAndLayout() {
-        let widthMax = ThumbnailsPanel.maxThumbnailsWidth().rounded()
+        let widthMax = (ThumbnailsPanel.maxThumbnailsWidth() - SwitcherAppearancePicker.reservedWidth).rounded()
         if let (maxX, maxY, labelHeight) = layoutThumbnailViews(widthMax) {
             layoutParentViews(maxX, widthMax, maxY, labelHeight)
             if Preferences.alignThumbnails == .center {
@@ -182,16 +193,25 @@ class ThumbnailsView: NSVisualEffectView {
         let heightMax = ThumbnailsPanel.maxThumbnailsHeight()
         ThumbnailsView.thumbnailsWidth = min(maxX, widthMax)
         ThumbnailsView.thumbnailsHeight = min(maxY, heightMax)
-        let frameWidth = ThumbnailsView.thumbnailsWidth + Appearance.windowPadding * 2
+        let frameWidth = ThumbnailsView.thumbnailsWidth + Appearance.windowPadding * 2 + SwitcherAppearancePicker.reservedWidth
         var frameHeight = ThumbnailsView.thumbnailsHeight + Appearance.windowPadding * 2
-        let originX = Appearance.windowPadding
+        let originX = Appearance.windowPadding + SwitcherAppearancePicker.reservedWidth
         var originY = Appearance.windowPadding
         if Preferences.appearanceStyle == .appIcons {
             // If there is title under the icon on the last line, the height of the title needs to be subtracted.
             frameHeight = frameHeight - Appearance.intraCellPadding - labelHeight
             originY = originY - Appearance.intraCellPadding - labelHeight
         }
+        let minimumHeight = SwitcherAppearancePicker.height + Appearance.windowPadding * 2
+        if frameHeight < minimumHeight {
+            originY += (minimumHeight - frameHeight) / 2
+            frameHeight = minimumHeight
+        }
         frame.size = NSSize(width: frameWidth, height: frameHeight)
+        appearancePicker.frame = NSRect(x: Appearance.windowPadding,
+            y: (frameHeight - SwitcherAppearancePicker.height) / 2,
+            width: SwitcherAppearancePicker.buttonSize, height: SwitcherAppearancePicker.height)
+        appearancePicker.updateSelection(Preferences.appearanceStyle)
         scrollView.frame.size = NSSize(width: min(maxX, widthMax), height: min(maxY, heightMax))
         scrollView.frame.origin = CGPoint(x: originX, y: originY)
         scrollView.contentView.frame.size = scrollView.frame.size
@@ -240,6 +260,130 @@ class ThumbnailsView: NSVisualEffectView {
             for i in rowStartIndex..<index {
                 ThumbnailsView.recycledViews[i].frame.origin.x += App.shared.userInterfaceLayoutDirection == .leftToRight ? offset : -offset
             }
+        }
+    }
+}
+
+/// A fixed rail, separate from the scrolling window entries.
+class SwitcherAppearancePicker: FlippedView {
+    static let buttonSize = CGFloat(30)
+    static let spacing = CGFloat(6)
+    static let reservedWidth = buttonSize + 12
+    static let height = buttonSize * 3 + spacing * 2
+    var onSelect: ((AppearanceStylePreference) -> Void)?
+    private var buttons = [SwitcherAppearanceButton]()
+
+    init() {
+        super.init(frame: .zero)
+        setAccessibilityLabel(NSLocalizedString("Appearance", comment: ""))
+        for (index, style) in AppearanceStylePreference.allCases.enumerated() {
+            let button = SwitcherAppearanceButton(style)
+            button.frame = NSRect(x: 0, y: CGFloat(index) * (Self.buttonSize + Self.spacing),
+                width: Self.buttonSize, height: Self.buttonSize)
+            button.target = self
+            button.action = #selector(selectStyle)
+            addSubview(button)
+            buttons.append(button)
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("Class only supports programmatic initialization")
+    }
+
+    func updateSelection(_ selectedStyle: AppearanceStylePreference) {
+        for button in buttons {
+            button.state = button.style == selectedStyle ? .on : .off
+            button.needsDisplay = true
+        }
+    }
+
+    @objc private func selectStyle(_ sender: SwitcherAppearanceButton) {
+        updateSelection(sender.style)
+        onSelect?(sender.style)
+    }
+}
+
+class SwitcherAppearanceButton: NSButton {
+    let style: AppearanceStylePreference
+    private var isHovered = false
+
+    init(_ style: AppearanceStylePreference) {
+        self.style = style
+        super.init(frame: .zero)
+        title = ""
+        toolTip = style.localizedString
+        setAccessibilityLabel(style.localizedString)
+        setButtonType(.toggle)
+        isBordered = false
+        refusesFirstResponder = true
+        imagePosition = .imageOnly
+        image = Self.makeIcon(style)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("Class only supports programmatic initialization")
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if state == .on || isHovered || isHighlighted {
+            let color = state == .on ? NSColor.selectedControlColor : NSColor.labelColor
+            color.withAlphaComponent(isHighlighted ? 0.4 : state == .on ? 0.3 : 0.1).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
+        }
+        image?.draw(in: NSRect(x: (bounds.width - 18) / 2, y: (bounds.height - 18) / 2,
+            width: 18, height: 18), from: .zero, operation: .sourceOver, fraction: 1,
+            respectFlipped: true, hints: nil)
+    }
+
+    private static func makeIcon(_ style: AppearanceStylePreference) -> NSImage {
+        NSImage(size: NSSize(width: 18, height: 18), flipped: true) { _ in
+            NSColor.labelColor.setStroke()
+            let path = NSBezierPath()
+            path.lineWidth = 1.4
+            switch style {
+            case .thumbnails:
+                path.appendRoundedRect(NSRect(x: 1.5, y: 3, width: 15, height: 12), xRadius: 2, yRadius: 2)
+                path.move(to: NSPoint(x: 2, y: 6.5))
+                path.line(to: NSPoint(x: 16, y: 6.5))
+                path.move(to: NSPoint(x: 4, y: 12))
+                path.line(to: NSPoint(x: 7, y: 9))
+                path.line(to: NSPoint(x: 10, y: 12))
+                path.line(to: NSPoint(x: 13, y: 9))
+            case .appIcons:
+                for x in [CGFloat(2), 10] {
+                    for y in [CGFloat(2), 10] {
+                        path.appendRoundedRect(NSRect(x: x, y: y, width: 6, height: 6), xRadius: 1.5, yRadius: 1.5)
+                    }
+                }
+            case .titles:
+                for y in [CGFloat(4), 9, 14] {
+                    path.appendRoundedRect(NSRect(x: 1.5, y: y - 1, width: 2, height: 2), xRadius: 0.5, yRadius: 0.5)
+                    path.move(to: NSPoint(x: 6, y: y))
+                    path.line(to: NSPoint(x: 16, y: y))
+                }
+            }
+            path.stroke()
+            return true
         }
     }
 }

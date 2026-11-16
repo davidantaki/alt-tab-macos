@@ -11,6 +11,25 @@ This document gives a technical overview of the project, for newcomers who want 
 
 ## Building the project locally
 
+For the DavidAltTab fork, run `make install` to build a Debug app, replace
+`/Applications/DavidAltTab.app`, and launch it. The command stages and verifies
+the build before stopping the running app. Before replacing an existing app, it
+resets only DavidAltTab's Accessibility and Screen Recording permissions to clear
+grants associated with the old build. App preferences remain in place.
+
+Full Xcode must be installed and selected. If setup is incomplete, run
+`sudo xcodebuild -runFirstLaunch`, then retry `make install` without `sudo`.
+The default build uses ad-hoc signing. Grant Accessibility and Screen Recording
+access again after replacing the app. The installer cannot grant these permissions.
+The Makefile targets macOS 12 or later because current Xcode versions no longer
+support the upstream project's macOS 10.12 deployment target.
+It reports Swift warnings without treating them as errors, since the newer
+deployment target exposes deprecation warnings in existing code.
+
+Use `make build` to build without installing. Override the destination with
+`make install INSTALL_DIR="$HOME/Applications"`. To use an existing local
+signing identity, pass `CODE_SIGN_IDENTITY="Local Self-Signed"`.
+
 This project has minimal dependency on Xcode-only features (e.g. InterfaceBuilder, Playgrounds). You can build it by doing:
 
 * `scripts/codesign/setup_local.sh` to generate a local self-signed certificate, to avoid having to re-check the `System Preferences > Security & Privacy` permissions on every build
